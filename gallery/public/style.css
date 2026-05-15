@@ -86,12 +86,58 @@ button:hover { border-color: var(--accent); }
   cursor: pointer;
   border: 1px solid transparent;
   margin-bottom: 6px;
+  align-items: flex-start;
 }
 .card:hover { background: var(--panel-2); }
 .card.active {
   background: var(--accent-bg);
   border-color: var(--accent);
 }
+.card.selected {
+  background: var(--accent-bg);
+  border-color: var(--accent);
+}
+
+.card-select {
+  display: flex;
+  align-items: center;
+  padding-top: 26px;
+}
+.card-select input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+
+.bulk-bar {
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: var(--panel-2);
+}
+.bulk-bar.hidden { display: none; }
+.bulk-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+}
+.bulk-count {
+  color: var(--text);
+  font-weight: 500;
+}
+.bulk-link {
+  background: transparent;
+  border: none;
+  padding: 2px 4px;
+  color: var(--accent);
+  font-size: 12px;
+  cursor: pointer;
+}
+.bulk-link:hover { text-decoration: underline; }
 
 .thumb {
   width: 120px;

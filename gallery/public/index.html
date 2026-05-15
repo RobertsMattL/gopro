@@ -21,6 +21,18 @@
         <span class="filters-label">Filter:</span>
         <div id="filter-chips" class="chip-row"></div>
       </div>
+      <div id="bulk-bar" class="bulk-bar hidden" aria-label="Bulk actions">
+        <div class="bulk-row">
+          <span id="bulk-count" class="bulk-count">0 selected</span>
+          <button id="bulk-select-all" type="button" class="bulk-link">Select all</button>
+          <button id="bulk-clear" type="button" class="bulk-link">Clear</button>
+        </div>
+        <div class="cat-add">
+          <input id="bulk-cat-input" type="text" list="cat-suggestions"
+                 placeholder="Assign category to selected…" autocomplete="off" />
+          <button id="bulk-cat-add-btn" type="button">Add</button>
+        </div>
+      </div>
       <section id="list" class="list"></section>
     </aside>
 

@@ -13,11 +13,18 @@ const catAddBtn = document.getElementById('cat-add-btn');
 const filterChipsEl = document.getElementById('filter-chips');
 const statusEl = document.getElementById('status');
 const refreshBtn = document.getElementById('refresh');
+const bulkBarEl = document.getElementById('bulk-bar');
+const bulkCountEl = document.getElementById('bulk-count');
+const bulkSelectAllBtn = document.getElementById('bulk-select-all');
+const bulkClearBtn = document.getElementById('bulk-clear');
+const bulkCatInput = document.getElementById('bulk-cat-input');
+const bulkCatAddBtn = document.getElementById('bulk-cat-add-btn');
 
 let videos = [];
 let categories = [];          // [{id, name, count}]
 let activeId = null;
 const selectedFilters = new Set();  // category ids; "__none__" for Uncategorized
+const selectedIds = new Set();      // video ids checked for bulk actions
 
 function fmtDate(unix) {
   if (!unix) return '';
@@ -70,21 +77,32 @@ function renderFilters() {
 function renderList() {
   listEl.innerHTML = '';
   const visible = videos.filter(videoMatchesFilters);
+  // Drop any selections that are no longer visible/present.
+  for (const id of [...selectedIds]) {
+    if (!visible.find((v) => v.id === id)) selectedIds.delete(id);
+  }
   if (visible.length === 0) {
     const msg = videos.length === 0
       ? 'No videos found in the served directory.'
       : 'No videos match the selected filters.';
     listEl.innerHTML = `<div class="error">${msg}</div>`;
+    renderBulkBar();
     return;
   }
   for (const v of visible) {
     const card = document.createElement('div');
-    card.className = 'card' + (v.id === activeId ? ' active' : '');
+    const isSelected = selectedIds.has(v.id);
+    card.className = 'card'
+      + (v.id === activeId ? ' active' : '')
+      + (isSelected ? ' selected' : '');
     card.dataset.id = v.id;
     const cardCats = v.categories.map(
       (c) => `<span class="chip chip-sm">${escapeHtml(c.name)}</span>`,
     ).join('');
     card.innerHTML = `
+      <label class="card-select" aria-label="Select for bulk actions">
+        <input type="checkbox" ${isSelected ? 'checked' : ''} />
+      </label>
       <img class="thumb" loading="lazy" alt="" src="${v.thumbnail_url}"
            onerror="this.style.background='#222';this.removeAttribute('src');" />
       <div class="card-meta">
@@ -93,9 +111,30 @@ function renderList() {
         ${cardCats ? `<div class="card-chips chip-row">${cardCats}</div>` : ''}
       </div>
     `;
+    const checkbox = card.querySelector('.card-select input');
+    const checkboxLabel = card.querySelector('.card-select');
+    checkboxLabel.addEventListener('click', (e) => e.stopPropagation());
+    checkbox.addEventListener('change', () => {
+      if (checkbox.checked) selectedIds.add(v.id);
+      else selectedIds.delete(v.id);
+      card.classList.toggle('selected', checkbox.checked);
+      renderBulkBar();
+    });
     card.addEventListener('click', () => select(v.id));
     listEl.appendChild(card);
   }
+  renderBulkBar();
+}
+
+function renderBulkBar() {
+  const n = selectedIds.size;
+  if (n === 0) {
+    bulkBarEl.classList.add('hidden');
+    bulkCatInput.value = '';
+    return;
+  }
+  bulkBarEl.classList.remove('hidden');
+  bulkCountEl.textContent = `${n} selected`;
 }
 
 function renderSuggestions() {
@@ -228,5 +267,47 @@ catInput.addEventListener('keydown', (e) => {
     attachCategory(catInput.value);
   }
 });
+
+async function bulkAttachCategory(name) {
+  const trimmed = name.trim();
+  if (!trimmed || selectedIds.size === 0) return;
+  const ids = [...selectedIds];
+  setStatus(`assigning "${trimmed}" to ${ids.length}…`);
+  try {
+    const results = await Promise.allSettled(ids.map((id) => fetchJson(
+      `/api/videos/${id}/categories`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: trimmed }),
+      },
+    )));
+    const failed = results.filter((r) => r.status === 'rejected');
+    bulkCatInput.value = '';
+    await refreshAll();
+    if (failed.length) {
+      setStatus(`assigned to ${ids.length - failed.length}/${ids.length} — ${failed.length} failed`, true);
+    }
+  } catch (err) {
+    setStatus(`error: ${err.message}`, true);
+  }
+}
+
+bulkCatAddBtn.addEventListener('click', () => bulkAttachCategory(bulkCatInput.value));
+bulkCatInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    bulkAttachCategory(bulkCatInput.value);
+  }
+});
+bulkSelectAllBtn.addEventListener('click', () => {
+  for (const v of videos.filter(videoMatchesFilters)) selectedIds.add(v.id);
+  renderList();
+});
+bulkClearBtn.addEventListener('click', () => {
+  selectedIds.clear();
+  renderList();
+});
+
 refreshBtn.addEventListener('click', refreshAll);
 refreshAll();
