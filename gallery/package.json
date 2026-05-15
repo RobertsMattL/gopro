@@ -1,0 +1,13 @@
+{
+  "name": "gopro-gallery",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Master-detail gallery viewer for the gopro.py REST API.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}

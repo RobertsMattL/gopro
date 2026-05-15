@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>GoPro Gallery</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>GoPro Gallery</h1>
+    <div class="topbar-actions">
+      <span id="status" class="status">loading…</span>
+      <button id="refresh" type="button">Refresh</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside class="list-pane" aria-label="Video list">
+      <div id="filters" class="filters" aria-label="Category filters">
+        <span class="filters-label">Filter:</span>
+        <div id="filter-chips" class="chip-row"></div>
+      </div>
+      <section id="list" class="list"></section>
+    </aside>
+
+    <section class="detail" aria-label="Player">
+      <div id="player-wrap" class="player-wrap">
+        <video id="player" controls preload="metadata" playsinline></video>
+        <div id="empty" class="empty">Select a video to play</div>
+      </div>
+      <div id="meta" class="meta">
+        <div id="meta-info" class="meta-info"></div>
+        <div id="meta-categories" class="meta-categories hidden">
+          <div class="meta-categories-label">Categories</div>
+          <div id="active-chips" class="chip-row"></div>
+          <div class="cat-add">
+            <input id="cat-input" type="text" list="cat-suggestions"
+                   placeholder="Add category…" autocomplete="off" />
+            <datalist id="cat-suggestions"></datalist>
+            <button id="cat-add-btn" type="button">Add</button>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>

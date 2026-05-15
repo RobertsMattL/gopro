@@ -1,0 +1,16 @@
+# Node
+node_modules/
+npm-debug.log*
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+
+# Runtime artifacts created by `gopro serve`
+.thumbnails/
+*.db
+
+# OS
+.DS_Store
