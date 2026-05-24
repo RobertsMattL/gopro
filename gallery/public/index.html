@@ -10,14 +10,24 @@
   <header class="topbar">
     <h1>GoPro Gallery</h1>
     <div class="topbar-actions">
+      <span id="storage" class="storage" title="Disk usage on the served volume"></span>
       <span id="status" class="status">loading…</span>
+      <button id="quality-toggle" type="button"
+              title="Toggle between the original stream and a 720p re-encoded version for slow connections / phones">
+        Quality: HD
+      </button>
       <button id="refresh" type="button">Refresh</button>
     </div>
   </header>
 
   <main class="layout">
     <aside class="list-pane" aria-label="Video list">
-      <div id="filters" class="filters" aria-label="Category filters">
+      <div id="filters" class="filters" aria-label="Filters">
+        <div id="type-filter" class="type-filter" role="group" aria-label="Media type">
+          <button type="button" class="type-btn active" data-type="all">All</button>
+          <button type="button" class="type-btn" data-type="image">Photos</button>
+          <button type="button" class="type-btn" data-type="video">Videos</button>
+        </div>
         <span class="filters-label">Filter:</span>
         <div id="filter-chips" class="chip-row"></div>
       </div>
@@ -26,6 +36,7 @@
           <span id="bulk-count" class="bulk-count">0 selected</span>
           <button id="bulk-select-all" type="button" class="bulk-link">Select all</button>
           <button id="bulk-clear" type="button" class="bulk-link">Clear</button>
+          <button id="bulk-delete" type="button" class="bulk-link bulk-danger">Delete</button>
         </div>
         <div class="cat-add">
           <input id="bulk-cat-input" type="text" list="cat-suggestions"
@@ -39,7 +50,8 @@
     <section class="detail" aria-label="Player">
       <div id="player-wrap" class="player-wrap">
         <video id="player" controls preload="metadata" playsinline></video>
-        <div id="empty" class="empty">Select a video to play</div>
+        <img id="image-view" class="image-view" alt="" />
+        <div id="empty" class="empty">Select an item to view</div>
       </div>
       <div id="meta" class="meta">
         <div id="meta-info" class="meta-info"></div>

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""GoPro toolkit: export files from an SD card and serve a video gallery."""
+"""GoPro toolkit: export files from an SD card and serve a media gallery."""
 
 from __future__ import annotations
 
@@ -20,11 +20,15 @@ from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 VIDEO_EXTS = {".mp4", ".360"}
 AUX_EXTS = {".lrv", ".thm", ".wav"}
-GALLERY_EXTS = {".mp4", ".mov", ".m4v"}  # what the serve command will list
+# Media the `serve` command lists in the gallery, split by kind so each can be
+# routed to the right player/viewer on the frontend.
+GALLERY_VIDEO_EXTS = {".mp4", ".mov", ".m4v"}
+GALLERY_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tif", ".tiff"}
+GALLERY_EXTS = GALLERY_VIDEO_EXTS | GALLERY_IMAGE_EXTS
 THUMB_DIR_NAME = ".thumbnails"
 CATEGORIES_DB_NAME = "categories.db"
 MAX_POST_BYTES = 1 << 16  # 64 KiB is plenty for our JSON bodies
@@ -50,6 +54,35 @@ def friendly_ctime(p: Path) -> str:
     st = p.stat()
     ts = getattr(st, "st_birthtime", st.st_mtime)
     return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+
+
+def find_aux_companions(video: Path) -> list[Path]:
+    """Return existing aux files (.lrv/.thm/.wav) that belong to this video.
+
+    Matches two GoPro naming conventions:
+      - same stem, aux extension (HERO5 and earlier, plus .THM/.WAV on all models)
+      - GX-prefix MP4 paired with a GL-prefix .LRV (HERO6+)
+    Case-insensitive on both stem and extension.
+    """
+    parent = video.parent
+    stem = video.stem
+    candidates: list[Path] = []
+    stems = {stem}
+    # HERO6+: GX010123.MP4 has its low-res preview saved as GL010123.LRV.
+    if len(stem) >= 2 and stem[:2].upper() == "GX":
+        stems.add("GL" + stem[2:])
+    try:
+        entries = list(parent.iterdir())
+    except OSError:
+        return []
+    for entry in entries:
+        if not entry.is_file() or entry == video:
+            continue
+        if entry.suffix.lower() not in AUX_EXTS:
+            continue
+        if entry.stem.upper() in {s.upper() for s in stems}:
+            candidates.append(entry)
+    return candidates
 
 
 # ---------------------------------------------------------------------------
@@ -183,13 +216,31 @@ def cmd_export(args: argparse.Namespace) -> int:
         if not args.yes and not confirm(f"Delete {len(successful_sources)} source file(s) from {src}?"):
             print("Delete cancelled.")
             return 0
+        # Also sweep aux companions (.LRV/.THM/.WAV) for every successfully
+        # copied video, even if --include-aux wasn't used — leaving them on the
+        # card is the whole reason a follow-up export looks like it has work to
+        # do. find_aux_companions only matches video stems, so non-video files
+        # (already-deleted MP4s, unrelated files) are unaffected.
+        aux_to_delete: list[Path] = []
+        seen_aux: set[Path] = set()
+        for f in successful_sources:
+            if f.suffix.lower() not in VIDEO_EXTS:
+                continue
+            for aux in find_aux_companions(f):
+                if aux in seen_aux:
+                    continue
+                seen_aux.add(aux)
+                aux_to_delete.append(aux)
+
         deleted = 0
         delete_errors = 0
         readonly_seen = False
-        for f in successful_sources:
+        for f in [*successful_sources, *aux_to_delete]:
             try:
                 f.unlink()
                 deleted += 1
+            except FileNotFoundError:
+                continue  # may have been deleted as part of the video set already
             except OSError as e:
                 delete_errors += 1
                 if e.errno == 30:  # EROFS
@@ -254,10 +305,29 @@ class ThumbnailCache:
         ).hexdigest()
         return self.cache_dir / f"{digest}.jpg"
 
-    def get(self, video: Path) -> Path | None:
+    def delete_for(self, video: Path) -> bool:
+        """Remove the cached thumbnail for a video. Must be called BEFORE the
+        source is unlinked because the cache key depends on its mtime. Returns
+        True if a thumbnail was actually removed."""
+        try:
+            target = self._path_for(video)
+        except OSError:
+            return False
+        try:
+            target.unlink()
+            return True
+        except FileNotFoundError:
+            return False
+        except OSError as e:
+            print(f"[thumb] failed to remove {target}: {e}", file=sys.stderr)
+            return False
+
+    def get(self, video: Path, is_image: bool = False) -> Path | None:
         """Return path to a cached thumbnail, generating it if needed.
 
-        Returns None on failure (e.g. ffmpeg missing or video unreadable).
+        Works for both videos and still images; pass ``is_image=True`` for the
+        latter so we skip the (meaningless) seek pass. Returns None on failure
+        (e.g. ffmpeg missing or the source unreadable).
         """
         target = self._path_for(video)
         if target.exists() and target.stat().st_size > 0:
@@ -272,9 +342,11 @@ class ThumbnailCache:
                 tmp.unlink()
             except FileNotFoundError:
                 pass
-            # Two-pass strategy: try a fast seek first; if that fails, retry
-            # without seeking (some GoPro fragmented streams choke on -ss).
-            for attempt in ("seek", "no-seek"):
+            # Videos: try a fast seek first; if that fails, retry without
+            # seeking (some GoPro fragmented streams choke on -ss). Images have
+            # nothing to seek, so grab the single frame directly.
+            attempts = ("no-seek",) if is_image else ("seek", "no-seek")
+            for attempt in attempts:
                 cmd = [self.ffmpeg, "-y", "-loglevel", "error"]
                 if attempt == "seek":
                     cmd += ["-ss", str(self.seek_seconds)]
@@ -311,30 +383,161 @@ class ThumbnailCache:
             return None
 
 
-def list_gallery_videos(root: Path, db_path: Path | None = None) -> list[dict]:
+class TranscodeCache:
+    """Generates and caches 720p H.264/AAC MP4 transcodes of source videos for
+    mobile playback. Same cache-key scheme as ThumbnailCache (resolve + mtime),
+    same per-key locking, but the output is a faststart-flagged MP4."""
+
+    def __init__(self, root: Path, cache_dir: Path, ffmpeg: str = "ffmpeg",
+                 height: int = 720, crf: int = 23, audio_bitrate: str = "128k",
+                 timeout: int = 3600) -> None:
+        self.root = root
+        self.cache_dir = cache_dir
+        self.ffmpeg = ffmpeg
+        self.height = height
+        self.crf = crf
+        self.audio_bitrate = audio_bitrate
+        self.timeout = timeout
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self._locks: dict[str, threading.Lock] = {}
+        self._locks_guard = threading.Lock()
+
+    def _lock_for(self, key: str) -> threading.Lock:
+        with self._locks_guard:
+            lock = self._locks.get(key)
+            if lock is None:
+                lock = threading.Lock()
+                self._locks[key] = lock
+            return lock
+
+    def _path_for(self, video: Path) -> Path:
+        st = video.stat()
+        digest = hashlib.sha1(
+            f"{video.resolve()}::{int(st.st_mtime_ns)}::{self.height}p".encode("utf-8")
+        ).hexdigest()
+        return self.cache_dir / f"{digest}.{self.height}p.mp4"
+
+    def delete_for(self, video: Path) -> bool:
+        try:
+            target = self._path_for(video)
+        except OSError:
+            return False
+        try:
+            target.unlink()
+            return True
+        except FileNotFoundError:
+            return False
+        except OSError as e:
+            print(f"[transcode] failed to remove {target}: {e}", file=sys.stderr)
+            return False
+
+    def get(self, video: Path) -> Path | None:
+        target = self._path_for(video)
+        if target.exists() and target.stat().st_size > 0:
+            return target
+
+        with self._lock_for(str(target)):
+            if target.exists() and target.stat().st_size > 0:
+                return target
+
+            tmp = target.with_suffix(target.suffix + ".tmp")
+            try:
+                tmp.unlink()
+            except FileNotFoundError:
+                pass
+            cmd = [
+                self.ffmpeg, "-y", "-nostdin", "-loglevel", "error",
+                "-i", str(video),
+                "-vf", f"scale=-2:{self.height}",
+                "-c:v", "libx264", "-preset", "veryfast",
+                "-crf", str(self.crf), "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-b:a", self.audio_bitrate, "-ac", "2",
+                "-movflags", "+faststart",
+                # The tmp path ends in .mp4.tmp, which ffmpeg can't auto-detect
+                # — force the mp4 muxer explicitly.
+                "-f", "mp4",
+                str(tmp),
+            ]
+            try:
+                result = subprocess.run(cmd, capture_output=True, timeout=self.timeout)
+            except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+                print(f"[transcode] {video.name}: {e}", file=sys.stderr)
+                try:
+                    tmp.unlink()
+                except FileNotFoundError:
+                    pass
+                return None
+            if result.returncode == 0 and tmp.exists() and tmp.stat().st_size > 0:
+                try:
+                    os.replace(tmp, target)
+                    return target
+                except OSError as e:
+                    print(f"[transcode] rename failed: {e}", file=sys.stderr)
+                    return None
+            err = result.stderr.decode("utf-8", "replace").strip()
+            if err:
+                print(f"[transcode] {video.name}: {err}", file=sys.stderr)
+            try:
+                tmp.unlink()
+            except FileNotFoundError:
+                pass
+            return None
+
+
+def _scan_targets(root: Path) -> list[tuple[Path, set[str]]]:
+    """Decide which directories to scan, and with which extensions.
+
+    The expected layout is a media root holding ``images/`` and ``video/``
+    subdirectories; either may be absent. If neither exists we fall back to
+    scanning the root itself for any supported media, so a plain flat folder of
+    clips keeps working.
+    """
+    images = root / "images"
+    video = root / "video"
+    if not video.is_dir() and (root / "videos").is_dir():
+        video = root / "videos"  # accept the plural spelling too
+    targets: list[tuple[Path, set[str]]] = []
+    if images.is_dir():
+        targets.append((images, GALLERY_IMAGE_EXTS))
+    if video.is_dir():
+        targets.append((video, GALLERY_VIDEO_EXTS))
+    if not targets:
+        targets.append((root, GALLERY_EXTS))
+    return targets
+
+
+def list_media(root: Path, db_path: Path | None = None) -> list[dict]:
     cats_by_path: dict[str, list[dict]] = {}
     if db_path is not None and db_path.exists():
         with db_connect(db_path) as conn:
             cats_by_path = db_categories_by_relpath(conn)
     items = []
-    for f in find_files(root, GALLERY_EXTS):
-        # Skip anything inside our own cache directory.
-        if THUMB_DIR_NAME in f.parts:
-            continue
-        rel = f.relative_to(root).as_posix()
-        st = f.stat()
-        vid = encode_id(rel)
-        items.append({
-            "id": vid,
-            "name": f.name,
-            "relpath": rel,
-            "size": st.st_size,
-            "size_human": human_size(st.st_size),
-            "mtime": int(st.st_mtime),
-            "thumbnail_url": f"/api/thumbnails/{vid}",
-            "stream_url": f"/api/stream/{vid}",
-            "categories": cats_by_path.get(rel, []),
-        })
+    for directory, exts in _scan_targets(root):
+        for f in find_files(directory, exts):
+            # Skip anything inside our own cache directory.
+            if THUMB_DIR_NAME in f.parts:
+                continue
+            rel = f.relative_to(root).as_posix()
+            st = f.stat()
+            mid = encode_id(rel)
+            is_image = f.suffix.lower() in GALLERY_IMAGE_EXTS
+            item = {
+                "id": mid,
+                "name": f.name,
+                "relpath": rel,
+                "type": "image" if is_image else "video",
+                "size": st.st_size,
+                "size_human": human_size(st.st_size),
+                "mtime": int(st.st_mtime),
+                "thumbnail_url": f"/api/thumbnails/{mid}",
+                "categories": cats_by_path.get(rel, []),
+            }
+            if is_image:
+                item["image_url"] = f"/api/image/{mid}"
+            else:
+                item["stream_url"] = f"/api/stream/{mid}"
+            items.append(item)
+    items.sort(key=lambda it: it["relpath"])
     return items
 
 
@@ -440,6 +643,7 @@ class GalleryHandler(BaseHTTPRequestHandler):
     # Set by GalleryServer
     root: Path = None  # type: ignore[assignment]
     thumbs: ThumbnailCache = None  # type: ignore[assignment]
+    transcodes: TranscodeCache = None  # type: ignore[assignment]
     db_path: Path = None  # type: ignore[assignment]
 
     def log_message(self, fmt: str, *args) -> None:  # quieter default log
@@ -519,8 +723,11 @@ class GalleryHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
         path = unquote(path)
-        if path == "/api/videos":
-            return self._send_json(HTTPStatus.OK, list_gallery_videos(self.root, self.db_path))
+        # /api/videos kept as an alias for older clients; both list all media.
+        if path in ("/api/media", "/api/videos"):
+            return self._send_json(HTTPStatus.OK, list_media(self.root, self.db_path))
+        if path == "/api/storage":
+            return self._serve_storage()
         if path == "/api/categories":
             with db_connect(self.db_path) as conn:
                 return self._send_json(HTTPStatus.OK, db_list_categories(conn))
@@ -530,11 +737,14 @@ class GalleryHandler(BaseHTTPRequestHandler):
         m = re.fullmatch(r"/api/stream/([^/]+)", path)
         if m:
             return self._serve_stream(m.group(1))
+        m = re.fullmatch(r"/api/image/([^/]+)", path)
+        if m:
+            return self._serve_image(m.group(1))
         if path in ("/", "/health"):
             return self._send_json(HTTPStatus.OK, {
                 "ok": True,
                 "root": str(self.root),
-                "videos": len(list_gallery_videos(self.root, self.db_path)),
+                "items": len(list_media(self.root, self.db_path)),
             })
         self._send_error_json(HTTPStatus.NOT_FOUND, f"no route for {path}")
 
@@ -565,7 +775,54 @@ class GalleryHandler(BaseHTTPRequestHandler):
         m = re.fullmatch(r"/api/videos/([^/]+)/categories/(\d+)", path)
         if m:
             return self._detach_category(m.group(1), int(m.group(2)))
+        m = re.fullmatch(r"/api/videos/([^/]+)", path)
+        if m:
+            return self._delete_video(m.group(1))
         self._send_error_json(HTTPStatus.NOT_FOUND, f"no route for {path}")
+
+    def _serve_storage(self) -> None:
+        usage = shutil.disk_usage(self.root)
+        payload = {
+            "root": str(self.root),
+            "total": usage.total,
+            "used": usage.used,
+            "free": usage.free,
+            "total_human": human_size(usage.total),
+            "used_human": human_size(usage.used),
+            "free_human": human_size(usage.free),
+            "percent_used": round(usage.used * 100 / usage.total, 1) if usage.total else 0,
+        }
+        self._send_json(HTTPStatus.OK, payload)
+
+    def _delete_video(self, vid: str) -> None:
+        video = self._resolve_video(vid)
+        if video is None:
+            return self._send_error_json(HTTPStatus.NOT_FOUND, "video not found")
+        relpath = video.relative_to(self.root).as_posix()
+        # Remove derived caches before unlinking — both cache keys depend on
+        # the source file's mtime, so we can't recompute them post-delete.
+        self.thumbs.delete_for(video)
+        self.transcodes.delete_for(video)
+        aux_companions = find_aux_companions(video)
+        try:
+            video.unlink()
+        except OSError as e:
+            return self._send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR,
+                                         f"failed to delete file: {e}")
+        for aux in aux_companions:
+            try:
+                aux.unlink()
+            except OSError as e:
+                print(f"[delete] failed to remove aux {aux}: {e}", file=sys.stderr)
+        try:
+            with db_connect(self.db_path) as conn:
+                conn.execute(
+                    "DELETE FROM video_categories WHERE video_relpath = ?",
+                    (relpath,),
+                )
+        except sqlite3.Error as e:
+            print(f"[delete] db cleanup failed for {relpath}: {e}", file=sys.stderr)
+        self._send_json(HTTPStatus.OK, {"ok": True, "deleted": relpath})
 
     def _attach_category(self, vid: str) -> None:
         relpath = self._resolve_relpath(vid)
@@ -605,12 +862,23 @@ class GalleryHandler(BaseHTTPRequestHandler):
 
     # ---- endpoints -----------------------------------------------------
 
+    def _serve_image(self, vid: str) -> None:
+        img = self._resolve_video(vid)  # generic file resolver with traversal guard
+        if img is None:
+            return self._send_error_json(HTTPStatus.NOT_FOUND, "image not found")
+        self._serve_file_range(img)
+
     def _serve_thumbnail(self, vid: str) -> None:
         video = self._resolve_video(vid)
         if video is None:
-            return self._send_error_json(HTTPStatus.NOT_FOUND, "video not found")
-        thumb = self.thumbs.get(video)
+            return self._send_error_json(HTTPStatus.NOT_FOUND, "media not found")
+        is_image = video.suffix.lower() in GALLERY_IMAGE_EXTS
+        thumb = self.thumbs.get(video, is_image=is_image)
         if thumb is None:
+            # Images can still be shown at full size if ffmpeg couldn't make a
+            # downscaled thumbnail; videos have no such fallback.
+            if is_image:
+                return self._serve_file_range(video)
             return self._send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR,
                                          "thumbnail generation failed")
         size = thumb.stat().st_size
@@ -627,8 +895,20 @@ class GalleryHandler(BaseHTTPRequestHandler):
         video = self._resolve_video(vid)
         if video is None:
             return self._send_error_json(HTTPStatus.NOT_FOUND, "video not found")
-        total = video.stat().st_size
-        ctype = mimetypes.guess_type(video.name)[0] or "application/octet-stream"
+        qs = parse_qs(urlparse(self.path).query)
+        quality = (qs.get("q") or [""])[0]
+        if quality == "mobile":
+            target = self.transcodes.get(video)
+            if target is None:
+                return self._send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR,
+                                             "mobile transcode failed")
+        else:
+            target = video
+        self._serve_file_range(target)
+
+    def _serve_file_range(self, target: Path) -> None:
+        total = target.stat().st_size
+        ctype = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
         rng = self.headers.get("Range")
         start, end = 0, total - 1
         partial = False
@@ -672,7 +952,7 @@ class GalleryHandler(BaseHTTPRequestHandler):
         self._cors()
         self.end_headers()
 
-        with video.open("rb") as fh:
+        with target.open("rb") as fh:
             fh.seek(start)
             remaining = length
             chunk = 64 * 1024
@@ -700,25 +980,28 @@ def cmd_serve(args: argparse.Namespace) -> int:
     db_init(db_path)
     thumbs = ThumbnailCache(root=root, cache_dir=cache_dir,
                             seek_seconds=args.seek, width=args.thumb_width)
+    transcodes = TranscodeCache(root=root, cache_dir=cache_dir,
+                                height=args.mobile_height, crf=args.mobile_crf)
 
     if args.prewarm:
-        videos = [Path(v["relpath"]) for v in list_gallery_videos(root, db_path)]
-        print(f"Pre-warming {len(videos)} thumbnail(s) in {cache_dir}...")
-        for rel in videos:
-            full = root / rel
-            t = thumbs.get(full)
-            print(f"  {'OK ' if t else 'FAIL'} {rel}")
+        items = list_media(root, db_path)
+        print(f"Pre-warming {len(items)} thumbnail(s) in {cache_dir}...")
+        for item in items:
+            full = root / item["relpath"]
+            t = thumbs.get(full, is_image=item["type"] == "image")
+            print(f"  {'OK ' if t else 'FAIL'} {item['relpath']}")
 
     handler = GalleryHandler
     handler.root = root
     handler.thumbs = thumbs
+    handler.transcodes = transcodes
     handler.db_path = db_path
 
     server = ThreadingHTTPServer((args.host, args.port), handler)
     print(f"Serving {root}")
     print(f"  cache:  {cache_dir}")
     print(f"  db:     {db_path}")
-    print(f"  api:    http://{args.host}:{args.port}/api/videos")
+    print(f"  api:    http://{args.host}:{args.port}/api/media")
     print("  press Ctrl-C to stop")
     try:
         server.serve_forever()
@@ -757,10 +1040,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_serve = subs.add_parser(
         "serve",
-        help="Serve a directory of videos via a REST API.",
+        help="Serve a media directory (images + video) via a REST API.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p_serve.add_argument("directory", type=Path, help="Directory containing video files")
+    p_serve.add_argument("directory", type=Path,
+                         help="Media root. Scans images/ and video/ subdirectories if present, "
+                              "otherwise the directory itself.")
     p_serve.add_argument("--host", default="127.0.0.1", help="Host to bind")
     p_serve.add_argument("--port", type=int, default=8787, help="Port to bind")
     p_serve.add_argument("--cache-dir", type=Path, default=None,
@@ -770,6 +1055,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_serve.add_argument("--seek", type=float, default=1.0,
                          help="Seconds into the video to grab the thumbnail frame")
     p_serve.add_argument("--thumb-width", type=int, default=480, help="Thumbnail width in pixels")
+    p_serve.add_argument("--mobile-height", type=int, default=720,
+                         help="Vertical resolution for the mobile transcode")
+    p_serve.add_argument("--mobile-crf", type=int, default=23,
+                         help="x264 CRF for the mobile transcode (lower = better, larger)")
     p_serve.add_argument("--prewarm", action="store_true",
                          help="Pre-generate thumbnails for all videos on startup")
     p_serve.set_defaults(func=cmd_serve)
