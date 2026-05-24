@@ -360,3 +360,100 @@ button.active {
   .layout { grid-template-columns: 1fr; grid-template-rows: 40vh 1fr; }
   .list { border-right: none; border-bottom: 1px solid var(--border); }
 }
+
+/* ---------------------------------------------------------------------------
+   Grid view: the list pane fills the whole window as a thumbnail grid, and the
+   detail pane is promoted to a fullscreen lightbox when an item is opened.
+   All rules are scoped to body.view-grid so list view is untouched.
+--------------------------------------------------------------------------- */
+body.view-grid .layout {
+  grid-template-columns: 1fr;
+  grid-template-rows: 1fr;
+}
+body.view-grid .list-pane { border-right: none; }
+body.view-grid .list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 8px;
+  align-content: start;
+}
+body.view-grid .card {
+  flex-direction: column;
+  gap: 0;
+  padding: 0;
+  margin-bottom: 0;
+  position: relative;
+  border-radius: 8px;
+}
+body.view-grid .card .thumb-wrap {
+  width: 100%;
+  height: auto;
+  aspect-ratio: 1 / 1;
+}
+body.view-grid .card .thumb {
+  width: 100%;
+  height: 100%;
+  border-radius: 6px;
+}
+/* Float the bulk-select checkbox into the tile's corner. */
+body.view-grid .card-select {
+  position: absolute;
+  top: 5px;
+  left: 5px;
+  z-index: 2;
+  padding: 3px;
+  background: rgba(0, 0, 0, 0.5);
+  border-radius: 5px;
+}
+body.view-grid .card-meta { width: 100%; padding: 4px 6px 6px; }
+body.view-grid .card-name { font-size: 12px; }
+/* Keep tiles clean — drop the size/date line and per-card chips. */
+body.view-grid .card-sub,
+body.view-grid .card-chips { display: none; }
+
+/* Detail pane as lightbox: hidden until an item is opened, then fullscreen. */
+body.view-grid .detail { display: none; }
+body.view-grid.lightbox-open .detail {
+  display: flex;
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+}
+
+/* Lightbox close / prev / next — only shown over an open lightbox. */
+.lb-close,
+.lb-nav { display: none; }
+body.view-grid.lightbox-open .lb-close,
+body.view-grid.lightbox-open .lb-nav { display: flex; }
+.lb-close,
+.lb-nav {
+  position: absolute;
+  z-index: 5;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.5);
+  border: none;
+  cursor: pointer;
+  line-height: 1;
+}
+.lb-close:hover,
+.lb-nav:hover { background: rgba(0, 0, 0, 0.75); }
+.lb-close {
+  top: 10px;
+  right: 12px;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  font-size: 22px;
+}
+.lb-nav {
+  top: 50%;
+  transform: translateY(-50%);
+  width: 44px;
+  height: 72px;
+  border-radius: 8px;
+  font-size: 30px;
+}
+.lb-prev { left: 10px; }
+.lb-next { right: 10px; }

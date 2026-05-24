@@ -24,12 +24,19 @@ const bulkDeleteBtn = document.getElementById('bulk-delete');
 const bulkCatInput = document.getElementById('bulk-cat-input');
 const bulkCatAddBtn = document.getElementById('bulk-cat-add-btn');
 const typeFilterEl = document.getElementById('type-filter');
+const viewToggleEl = document.getElementById('view-toggle');
+const playerWrap = document.getElementById('player-wrap');
+const lbCloseEl = document.getElementById('lb-close');
+const lbPrevEl = document.getElementById('lb-prev');
+const lbNextEl = document.getElementById('lb-next');
 
 let videos = [];              // all media items (images + videos), each with a .type
 let categories = [];          // [{id, name, count}]
 let storage = null;           // {total, used, free, *_human, percent_used}
 let activeId = null;
 let selectedType = 'all';     // 'all' | 'image' | 'video' — media-type filter
+// 'list' = master-detail; 'grid' = thumbnail grid + fullscreen lightbox.
+let viewMode = localStorage.getItem('viewMode') === 'grid' ? 'grid' : 'list';
 const selectedFilters = new Set();  // category ids; "__none__" for Uncategorized
 const selectedIds = new Set();      // media ids checked for bulk actions
 
@@ -111,9 +118,14 @@ function renderFilters() {
   }
 }
 
+// The items currently shown, in render order — the set the lightbox steps through.
+function visibleItems() {
+  return videos.filter(itemMatchesFilters);
+}
+
 function renderList() {
   listEl.innerHTML = '';
-  const visible = videos.filter(itemMatchesFilters);
+  const visible = visibleItems();
   // Drop any selections that are no longer visible/present.
   for (const id of [...selectedIds]) {
     if (!visible.find((v) => v.id === id)) selectedIds.delete(id);
@@ -265,7 +277,21 @@ function select(id) {
   else showVideo(v);
   // The Quality (HD/mobile transcode) toggle only applies to videos.
   qualityToggleEl.classList.toggle('hidden', v.type === 'image');
+  // In grid view, selecting an item raises the detail pane as a lightbox.
+  document.body.classList.toggle('lightbox-open', viewMode === 'grid');
   renderDetail();
+}
+
+// Step to the previous/next item in the visible set (lightbox arrows + keys).
+function stepLightbox(delta) {
+  const items = visibleItems();
+  if (items.length === 0) return;
+  let idx = items.findIndex((v) => v.id === activeId);
+  idx = idx === -1 ? 0 : (idx + delta + items.length) % items.length;
+  const next = items[idx];
+  select(next.id);
+  next && document.querySelector(`.card[data-id="${next.id}"]`)
+    ?.scrollIntoView({ block: 'nearest' });
 }
 
 function setMobileMode(on) {
@@ -423,6 +449,8 @@ function clearPlayer() {
   imageView.removeAttribute('src');
   qualityToggleEl.classList.remove('hidden');
   emptyEl.classList.remove('hidden');
+  document.body.classList.remove('lightbox-open');
+  for (const c of listEl.querySelectorAll('.card.active')) c.classList.remove('active');
 }
 
 async function deleteVideo(id) {
@@ -471,7 +499,7 @@ bulkCatInput.addEventListener('keydown', (e) => {
   }
 });
 bulkSelectAllBtn.addEventListener('click', () => {
-  for (const v of videos.filter(itemMatchesFilters)) selectedIds.add(v.id);
+  for (const v of visibleItems()) selectedIds.add(v.id);
   renderList();
 });
 bulkClearBtn.addEventListener('click', () => {
@@ -490,7 +518,43 @@ typeFilterEl.addEventListener('click', (e) => {
   renderList();
 });
 
+// ---- view mode (list vs thumbnail grid) -----------------------------------
+
+function applyViewMode() {
+  document.body.classList.toggle('view-grid', viewMode === 'grid');
+  viewToggleEl.textContent = viewMode === 'grid' ? '☰ List' : '⊞ Grid';
+  viewToggleEl.title = viewMode === 'grid'
+    ? 'Switch to list view' : 'Switch to thumbnail-grid view';
+}
+
+viewToggleEl.addEventListener('click', () => {
+  viewMode = viewMode === 'grid' ? 'list' : 'grid';
+  localStorage.setItem('viewMode', viewMode);
+  clearPlayer();        // drop any selection so we don't leave a video playing behind the grid
+  applyViewMode();
+});
+
+// Lightbox controls (only reachable while a grid item is open).
+lbCloseEl.addEventListener('click', clearPlayer);
+lbPrevEl.addEventListener('click', () => stepLightbox(-1));
+lbNextEl.addEventListener('click', () => stepLightbox(1));
+// Click on the dark letterbox area (not the media/controls) closes the lightbox.
+playerWrap.addEventListener('click', (e) => {
+  if (e.target === playerWrap && document.body.classList.contains('lightbox-open')) {
+    clearPlayer();
+  }
+});
+document.addEventListener('keydown', (e) => {
+  if (!document.body.classList.contains('lightbox-open')) return;
+  const t = e.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return;  // don't hijack typing
+  if (e.key === 'Escape') clearPlayer();
+  else if (e.key === 'ArrowLeft') { e.preventDefault(); stepLightbox(-1); }
+  else if (e.key === 'ArrowRight') { e.preventDefault(); stepLightbox(1); }
+});
+
 refreshBtn.addEventListener('click', refreshAll);
 qualityToggleEl.addEventListener('click', () => setMobileMode(!mobileMode));
 renderQualityToggle();
+applyViewMode();
 refreshAll();

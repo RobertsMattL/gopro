@@ -4,6 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>GoPro Gallery</title>
+  <link rel="icon" href="data:," />
   <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
@@ -12,6 +13,7 @@
     <div class="topbar-actions">
       <span id="storage" class="storage" title="Disk usage on the served volume"></span>
       <span id="status" class="status">loading…</span>
+      <button id="view-toggle" type="button" title="Switch to thumbnail-grid view">⊞ Grid</button>
       <button id="quality-toggle" type="button"
               title="Toggle between the original stream and a 720p re-encoded version for slow connections / phones">
         Quality: HD
@@ -49,6 +51,9 @@
 
     <section class="detail" aria-label="Player">
       <div id="player-wrap" class="player-wrap">
+        <button id="lb-prev" class="lb-nav lb-prev" type="button" title="Previous (←)" aria-label="Previous">‹</button>
+        <button id="lb-next" class="lb-nav lb-next" type="button" title="Next (→)" aria-label="Next">›</button>
+        <button id="lb-close" class="lb-close" type="button" title="Close (Esc)" aria-label="Close">×</button>
         <video id="player" controls preload="metadata" playsinline></video>
         <img id="image-view" class="image-view" alt="" />
         <div id="empty" class="empty">Select an item to view</div>

@@ -47,7 +47,13 @@ def human_size(n: int) -> str:
 
 
 def find_files(src: Path, exts: set[str]) -> list[Path]:
-    return sorted(p for p in src.rglob("*") if p.is_file() and p.suffix.lower() in exts)
+    # Skip macOS AppleDouble sidecars ("._NAME"): tiny resource-fork files the
+    # Finder scatters onto exFAT/FAT volumes. They share the real file's
+    # extension but aren't decodable media, and should never be copied either.
+    return sorted(
+        p for p in src.rglob("*")
+        if p.is_file() and p.suffix.lower() in exts and not p.name.startswith("._")
+    )
 
 
 def friendly_ctime(p: Path) -> str:
