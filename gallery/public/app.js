@@ -29,6 +29,17 @@ const playerWrap = document.getElementById('player-wrap');
 const lbCloseEl = document.getElementById('lb-close');
 const lbPrevEl = document.getElementById('lb-prev');
 const lbNextEl = document.getElementById('lb-next');
+const frameModalEl = document.getElementById('frame-modal');
+const frameDialogEl = frameModalEl.querySelector('.frame-dialog');
+const frameTitleEl = document.getElementById('frame-title');
+const frameStatusEl = document.getElementById('frame-status');
+const frameCloseEl = document.getElementById('frame-close');
+const frameVideoEl = document.getElementById('frame-video');
+const frameSeekEl = document.getElementById('frame-seek');
+const frameTimeEl = document.getElementById('frame-time');
+const framePlayEl = document.getElementById('frame-play');
+const frameSaveEl = document.getElementById('frame-save');
+const frameStripEl = document.getElementById('frame-strip');
 
 let videos = [];              // all media items (images + videos), each with a .type
 let categories = [];          // [{id, name, count}]
@@ -271,6 +282,15 @@ function renderDetail() {
     <span class="muted">${escapeHtml(v.relpath)}</span>
     <a href="${fileUrl}" download="${escapeHtml(v.name)}">download</a>
   `;
+  if (v.type === 'video') {
+    const frameBtn = document.createElement('button');
+    frameBtn.type = 'button';
+    frameBtn.className = 'btn-frame';
+    frameBtn.textContent = '⛶ Grab frame';
+    frameBtn.title = 'Pick a frame from this video and save it as a photo';
+    frameBtn.addEventListener('click', () => openFramePicker(v));
+    metaInfoEl.appendChild(frameBtn);
+  }
   const deleteBtn = document.createElement('button');
   deleteBtn.type = 'button';
   deleteBtn.className = 'btn-danger';
@@ -601,11 +621,197 @@ playerWrap.addEventListener('click', (e) => {
 });
 document.addEventListener('keydown', (e) => {
   if (!document.body.classList.contains('lightbox-open')) return;
+  if (!frameModalEl.classList.contains('hidden')) return;  // picker owns the keys
   const t = e.target;
   if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return;  // don't hijack typing
   if (e.key === 'Escape') clearPlayer();
   else if (e.key === 'ArrowLeft') { e.preventDefault(); stepLightbox(-1); }
   else if (e.key === 'ArrowRight') { e.preventDefault(); stepLightbox(1); }
+});
+
+// ---- frame picker ----------------------------------------------------------
+// Open any video, scrub/step to a moment, and save that exact frame as a new
+// photo. The picker always loads the original (HD) stream so saved frames are
+// full resolution regardless of the Quality toggle; the actual extraction is
+// done server-side from the source file at the chosen timestamp.
+
+const FRAME_STEP = 1 / 30;   // ~one frame at 30fps; fine enough for selection
+let framePickerItem = null;  // the video currently open in the picker
+let frameScrubbing = false;  // user is dragging the seek slider
+
+function fmtClock(sec) {
+  if (!isFinite(sec) || sec < 0) sec = 0;
+  const ms = Math.floor((sec - Math.floor(sec)) * 1000);
+  const total = Math.floor(sec);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const pad = (n) => String(n).padStart(2, '0');
+  const base = h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+  return `${base}.${String(ms).padStart(3, '0')}`;
+}
+
+function setFrameStatus(text, isError = false) {
+  frameStatusEl.textContent = text;
+  frameStatusEl.classList.toggle('error', isError);
+}
+
+function updateFrameTime() {
+  if (!frameScrubbing) frameSeekEl.value = String(frameVideoEl.currentTime || 0);
+  frameTimeEl.textContent =
+    `${fmtClock(frameVideoEl.currentTime)} / ${fmtClock(frameVideoEl.duration)}`;
+}
+
+function seekFrameTo(t) {
+  const dur = frameVideoEl.duration || 0;
+  const clamped = Math.max(0, Math.min(t, dur > 0 ? dur - 0.001 : t));
+  frameVideoEl.pause();
+  frameVideoEl.currentTime = clamped;
+  frameSeekEl.value = String(clamped);
+  updateFrameTime();
+}
+
+function stepFrame(delta) {
+  seekFrameTo((frameVideoEl.currentTime || 0) + delta);
+}
+
+// Sample evenly across the clip and ask the server for small JPEG previews,
+// loaded in parallel as plain <img> tags. Clicking one jumps the player there.
+function buildFilmstrip() {
+  const dur = frameVideoEl.duration;
+  frameStripEl.innerHTML = '';
+  if (!isFinite(dur) || dur <= 0) {
+    frameStripEl.innerHTML = '<span class="strip-empty">No preview frames available.</span>';
+    return;
+  }
+  const n = Math.min(16, Math.max(4, Math.ceil(dur)));
+  for (let i = 0; i < n; i++) {
+    const t = (dur * (i + 0.5)) / n;
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'strip-item';
+    item.dataset.t = String(t);
+    item.title = fmtClock(t);
+    const img = document.createElement('img');
+    img.loading = 'lazy';
+    img.alt = fmtClock(t);
+    img.src = `/api/frames/${framePickerItem.id}?t=${t.toFixed(3)}&w=200`;
+    img.addEventListener('error', () => { item.style.display = 'none'; });
+    item.appendChild(img);
+    item.addEventListener('click', () => seekFrameTo(t));
+    frameStripEl.appendChild(item);
+  }
+}
+
+function highlightStrip() {
+  const cur = frameVideoEl.currentTime || 0;
+  let best = null;
+  let bestDist = Infinity;
+  for (const item of frameStripEl.querySelectorAll('.strip-item')) {
+    const d = Math.abs(parseFloat(item.dataset.t) - cur);
+    if (d < bestDist) { bestDist = d; best = item; }
+    item.classList.remove('active');
+  }
+  if (best) best.classList.add('active');
+}
+
+function openFramePicker(v) {
+  framePickerItem = v;
+  frameTitleEl.textContent = v.name;
+  setFrameStatus('');
+  frameSaveEl.disabled = false;
+  stopVideo();  // don't leave the main player running behind the modal
+  frameStripEl.innerHTML = '<span class="strip-empty">Loading frames…</span>';
+  framePlayEl.textContent = '▶';
+  frameModalEl.classList.remove('hidden');
+  frameModalEl.setAttribute('aria-hidden', 'false');
+  frameVideoEl.src = v.stream_url;  // original quality, never the mobile transcode
+  frameVideoEl.currentTime = 0;
+  frameVideoEl.load();
+}
+
+function closeFramePicker() {
+  frameVideoEl.pause();
+  frameVideoEl.removeAttribute('src');
+  frameVideoEl.load();
+  frameStripEl.innerHTML = '';
+  frameModalEl.classList.add('hidden');
+  frameModalEl.setAttribute('aria-hidden', 'true');
+  framePickerItem = null;
+}
+
+async function saveCurrentFrame() {
+  if (!framePickerItem) return;
+  frameVideoEl.pause();
+  const t = frameVideoEl.currentTime || 0;
+  frameSaveEl.disabled = true;
+  setFrameStatus('saving…');
+  try {
+    const res = await fetchJson(`/api/frames/${framePickerItem.id}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ t }),
+    });
+    setFrameStatus(`saved ${res.item ? res.item.name : 'frame'} ✓ (${fmtClock(t)})`);
+    await refreshAll();  // surface the new photo in the gallery
+  } catch (err) {
+    setFrameStatus(`error: ${err.message}`, true);
+  } finally {
+    frameSaveEl.disabled = false;
+  }
+}
+
+frameVideoEl.addEventListener('loadedmetadata', () => {
+  frameSeekEl.max = String(frameVideoEl.duration || 0);
+  updateFrameTime();
+  buildFilmstrip();
+});
+frameVideoEl.addEventListener('timeupdate', updateFrameTime);
+frameVideoEl.addEventListener('seeked', () => { updateFrameTime(); highlightStrip(); });
+frameVideoEl.addEventListener('play', () => { framePlayEl.textContent = '⏸'; });
+frameVideoEl.addEventListener('pause', () => { framePlayEl.textContent = '▶'; });
+frameVideoEl.addEventListener('error', () => {
+  setFrameStatus('could not load this video', true);
+});
+
+frameSeekEl.addEventListener('input', () => {
+  frameScrubbing = true;
+  frameVideoEl.currentTime = parseFloat(frameSeekEl.value) || 0;
+  updateFrameTime();
+});
+frameSeekEl.addEventListener('change', () => { frameScrubbing = false; });
+
+framePlayEl.addEventListener('click', () => {
+  if (frameVideoEl.paused) frameVideoEl.play().catch(() => {});
+  else frameVideoEl.pause();
+});
+frameDialogEl.querySelector('.frame-steps').addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-step]');
+  if (!btn) return;
+  const raw = btn.dataset.step;
+  const delta = raw === 'frame' ? FRAME_STEP : raw === '-frame' ? -FRAME_STEP : parseFloat(raw);
+  stepFrame(delta);
+});
+frameSaveEl.addEventListener('click', saveCurrentFrame);
+frameCloseEl.addEventListener('click', closeFramePicker);
+frameModalEl.addEventListener('click', (e) => {
+  if (e.target === frameModalEl) closeFramePicker();  // click the backdrop
+});
+document.addEventListener('keydown', (e) => {
+  if (frameModalEl.classList.contains('hidden')) return;
+  if (e.key === 'Escape') { closeFramePicker(); return; }
+  if (e.target === frameSeekEl) return;  // let the slider handle its own keys
+  if (e.key === ' ') {
+    e.preventDefault();
+    if (frameVideoEl.paused) frameVideoEl.play().catch(() => {});
+    else frameVideoEl.pause();
+  } else if (e.key === 'ArrowLeft') {
+    e.preventDefault();
+    stepFrame(-FRAME_STEP);
+  } else if (e.key === 'ArrowRight') {
+    e.preventDefault();
+    stepFrame(FRAME_STEP);
+  }
 });
 
 refreshBtn.addEventListener('click', refreshAll);

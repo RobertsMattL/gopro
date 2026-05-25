@@ -458,3 +458,142 @@ body.view-grid.lightbox-open .lb-nav { display: flex; }
 }
 .lb-prev { left: 10px; }
 .lb-next { right: 10px; }
+
+/* ---------------------------------------------------------------------------
+   Frame picker: a modal over everything for scrubbing a video and saving a
+   single frame as a new photo.
+--------------------------------------------------------------------------- */
+.btn-frame { border-color: var(--accent); color: var(--accent); }
+.btn-frame:hover { background: var(--accent-bg); }
+
+.frame-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.75);
+  padding: 24px;
+}
+.frame-modal.hidden { display: none; }
+
+.frame-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(1100px, 100%);
+  max-height: 100%;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px;
+}
+
+.frame-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.frame-title {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.frame-status { color: var(--accent); font-size: 12px; }
+.frame-status.error { color: #ffb4b4; }
+.frame-close {
+  margin-left: auto;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  font-size: 18px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.frame-stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #000;
+  border-radius: 8px;
+  overflow: hidden;
+}
+.frame-stage video {
+  max-width: 100%;
+  max-height: 60vh;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+}
+
+.frame-scrub {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.frame-seek, #frame-seek {
+  flex: 1;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.frame-time {
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.frame-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.frame-play { width: 40px; }
+.frame-steps { display: flex; gap: 6px; }
+.frame-steps button { font-variant-numeric: tabular-nums; }
+.frame-save {
+  margin-left: auto;
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+.frame-save:hover { filter: brightness(1.1); }
+.frame-save:disabled { opacity: 0.5; cursor: default; filter: none; }
+
+.frame-strip {
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+  min-height: 56px;
+}
+.frame-strip .strip-item {
+  flex: 0 0 auto;
+  padding: 0;
+  border: 2px solid transparent;
+  border-radius: 4px;
+  overflow: hidden;
+  line-height: 0;
+  background: #000;
+}
+.frame-strip .strip-item:hover { border-color: var(--accent); }
+.frame-strip .strip-item.active { border-color: var(--accent); }
+.frame-strip .strip-item img {
+  height: 52px;
+  width: auto;
+  display: block;
+}
+.frame-strip .strip-empty {
+  color: var(--muted);
+  font-size: 12px;
+  align-self: center;
+  padding: 0 8px;
+}

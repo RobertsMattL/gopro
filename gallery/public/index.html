@@ -74,6 +74,38 @@
     </section>
   </main>
 
+  <!-- Frame picker: scrub a video, step frames, pick one to save as a photo. -->
+  <div id="frame-modal" class="frame-modal hidden" aria-hidden="true">
+    <div class="frame-dialog" role="dialog" aria-modal="true" aria-label="Pick a frame to save">
+      <div class="frame-head">
+        <span id="frame-title" class="frame-title"></span>
+        <span id="frame-status" class="frame-status"></span>
+        <button id="frame-close" type="button" class="frame-close"
+                title="Close (Esc)" aria-label="Close">×</button>
+      </div>
+      <div class="frame-stage">
+        <video id="frame-video" preload="auto" playsinline></video>
+      </div>
+      <div class="frame-scrub">
+        <input id="frame-seek" type="range" min="0" max="0" step="0.001" value="0"
+               aria-label="Scrub position" />
+        <span id="frame-time" class="frame-time">0:00.000 / 0:00.000</span>
+      </div>
+      <div class="frame-controls">
+        <button id="frame-play" type="button" class="frame-play"
+                title="Play / pause (space)" aria-label="Play / pause">▶</button>
+        <span class="frame-steps" role="group" aria-label="Step">
+          <button type="button" data-step="-1" title="Back 1 second">−1s</button>
+          <button type="button" data-step="-frame" title="Previous frame (←)">◀ frame</button>
+          <button type="button" data-step="frame" title="Next frame (→)">frame ▶</button>
+          <button type="button" data-step="1" title="Forward 1 second">+1s</button>
+        </span>
+        <button id="frame-save" type="button" class="frame-save">Save this frame</button>
+      </div>
+      <div id="frame-strip" class="frame-strip" aria-label="Sampled frames — click to jump"></div>
+    </div>
+  </div>
+
   <script src="/app.js"></script>
 </body>
 </html>

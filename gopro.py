@@ -490,6 +490,118 @@ class TranscodeCache:
             return None
 
 
+def extract_frame(ffmpeg: str, video: Path, t: float, dest: Path,
+                  width: int | None = None, quality: int = 2) -> bool:
+    """Extract a single still frame at ``t`` seconds from ``video`` to ``dest``
+    (JPEG). Returns True on success.
+
+    Uses input seeking (``-ss`` before ``-i``), which modern ffmpeg decodes
+    accurately to the requested timestamp while staying fast on long clips.
+    ``quality`` is the JPEG -q:v (lower is better); ``width`` downscales for
+    previews (height is kept even via scale=-2).
+    """
+    t = max(0.0, float(t))
+    cmd = [ffmpeg, "-y", "-nostdin", "-loglevel", "error",
+           "-ss", f"{t:.3f}", "-i", str(video), "-frames:v", "1"]
+    if width:
+        cmd += ["-vf", f"scale={int(width)}:-2"]
+    cmd += ["-q:v", str(quality), "-f", "image2", str(dest)]
+    try:
+        result = subprocess.run(cmd, capture_output=True, timeout=60)
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        print(f"[frame] {video.name}: {e}", file=sys.stderr)
+        return False
+    if result.returncode == 0 and dest.exists() and dest.stat().st_size > 0:
+        return True
+    err = result.stderr.decode("utf-8", "replace").strip()
+    if err:
+        print(f"[frame] {video.name} @ {t:.3f}s: {err}", file=sys.stderr)
+    return False
+
+
+class FrameCache:
+    """Extracts and caches single still frames at arbitrary timestamps, used by
+    the frontend frame-picker's filmstrip and previews. Same cache-key scheme as
+    the other caches (resolve + mtime) plus the timestamp and width, so a given
+    frame is only rendered once. Per-key locking avoids duplicate ffmpeg runs."""
+
+    def __init__(self, root: Path, cache_dir: Path, ffmpeg: str = "ffmpeg",
+                 quality: int = 4) -> None:
+        self.root = root
+        self.cache_dir = cache_dir
+        self.ffmpeg = ffmpeg
+        self.quality = quality
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self._locks: dict[str, threading.Lock] = {}
+        self._locks_guard = threading.Lock()
+
+    def _lock_for(self, key: str) -> threading.Lock:
+        with self._locks_guard:
+            lock = self._locks.get(key)
+            if lock is None:
+                lock = threading.Lock()
+                self._locks[key] = lock
+            return lock
+
+    def _path_for(self, video: Path, t: float, width: int) -> Path:
+        st = video.stat()
+        digest = hashlib.sha1(
+            f"{video.resolve()}::{int(st.st_mtime_ns)}::{t:.3f}::{width}".encode("utf-8")
+        ).hexdigest()
+        return self.cache_dir / f"frame_{digest}.jpg"
+
+    def get(self, video: Path, t: float, width: int | None = None) -> Path | None:
+        target = self._path_for(video, t, width or 0)
+        if target.exists() and target.stat().st_size > 0:
+            return target
+        with self._lock_for(str(target)):
+            if target.exists() and target.stat().st_size > 0:
+                return target
+            tmp = target.with_suffix(".jpg.tmp")
+            try:
+                tmp.unlink()
+            except FileNotFoundError:
+                pass
+            if extract_frame(self.ffmpeg, video, t, tmp,
+                             width=width, quality=self.quality):
+                try:
+                    os.replace(tmp, target)
+                    return target
+                except OSError as e:
+                    print(f"[frame] rename failed: {e}", file=sys.stderr)
+            try:
+                tmp.unlink()
+            except FileNotFoundError:
+                pass
+            return None
+
+
+def frames_output_dir(root: Path) -> Path:
+    """Directory where saved frames are written.
+
+    Mirrors the layout :func:`_scan_targets` expects: if the gallery uses an
+    ``images/``+``video/`` split (either present), frames go in ``images/`` so
+    they surface as photos (created if missing). For a flat folder of clips they
+    land next to the source media in the root.
+    """
+    images = root / "images"
+    if images.is_dir():
+        return images
+    if (root / "video").is_dir() or (root / "videos").is_dir():
+        images.mkdir(parents=True, exist_ok=True)
+        return images
+    return root
+
+
+def timecode_label(t: float) -> str:
+    """Filename-safe timecode, e.g. 83.456s -> '00-01-23-456'."""
+    total_ms = int(round(max(0.0, t) * 1000))
+    h, rem = divmod(total_ms, 3_600_000)
+    m, rem = divmod(rem, 60_000)
+    s, ms = divmod(rem, 1000)
+    return f"{h:02d}-{m:02d}-{s:02d}-{ms:03d}"
+
+
 def _scan_targets(root: Path) -> list[tuple[Path, set[str]]]:
     """Decide which directories to scan, and with which extensions.
 
@@ -650,6 +762,7 @@ class GalleryHandler(BaseHTTPRequestHandler):
     root: Path = None  # type: ignore[assignment]
     thumbs: ThumbnailCache = None  # type: ignore[assignment]
     transcodes: TranscodeCache = None  # type: ignore[assignment]
+    frames: FrameCache = None  # type: ignore[assignment]
     db_path: Path = None  # type: ignore[assignment]
 
     def log_message(self, fmt: str, *args) -> None:  # quieter default log
@@ -746,6 +859,9 @@ class GalleryHandler(BaseHTTPRequestHandler):
         m = re.fullmatch(r"/api/image/([^/]+)", path)
         if m:
             return self._serve_image(m.group(1))
+        m = re.fullmatch(r"/api/frames/([^/]+)", path)
+        if m:
+            return self._serve_frame_preview(m.group(1))
         if path in ("/", "/health"):
             return self._send_json(HTTPStatus.OK, {
                 "ok": True,
@@ -773,6 +889,9 @@ class GalleryHandler(BaseHTTPRequestHandler):
         m = re.fullmatch(r"/api/videos/([^/]+)/categories", path)
         if m:
             return self._attach_category(m.group(1))
+        m = re.fullmatch(r"/api/frames/([^/]+)", path)
+        if m:
+            return self._save_frame(m.group(1))
         self._send_error_json(HTTPStatus.NOT_FOUND, f"no route for {path}")
 
     def do_DELETE(self) -> None:  # noqa: N802
@@ -873,6 +992,76 @@ class GalleryHandler(BaseHTTPRequestHandler):
         if img is None:
             return self._send_error_json(HTTPStatus.NOT_FOUND, "image not found")
         self._serve_file_range(img)
+
+    def _serve_frame_preview(self, vid: str) -> None:
+        """Extract (and cache) a downscaled still at ?t=<sec> for the frame
+        picker's filmstrip. ?w=<px> sets the preview width."""
+        video = self._resolve_video(vid)
+        if video is None:
+            return self._send_error_json(HTTPStatus.NOT_FOUND, "video not found")
+        if video.suffix.lower() not in GALLERY_VIDEO_EXTS:
+            return self._send_error_json(HTTPStatus.BAD_REQUEST, "not a video")
+        qs = parse_qs(urlparse(self.path).query)
+        try:
+            t = float((qs.get("t") or ["0"])[0])
+        except ValueError:
+            return self._send_error_json(HTTPStatus.BAD_REQUEST, "invalid 't'")
+        width: int | None = None
+        if qs.get("w"):
+            try:
+                width = max(16, min(3840, int(qs["w"][0])))
+            except ValueError:
+                width = None
+        frame = self.frames.get(video, t, width=width)
+        if frame is None:
+            return self._send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR,
+                                         "frame extraction failed")
+        size = frame.stat().st_size
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Content-Length", str(size))
+        self.send_header("Cache-Control", "public, max-age=3600")
+        self._cors()
+        self.end_headers()
+        with frame.open("rb") as fh:
+            shutil.copyfileobj(fh, self.wfile)
+
+    def _save_frame(self, vid: str) -> None:
+        """Extract a full-resolution still at body {"t": <sec>} and save it into
+        the gallery as a new photo. Returns the new media item."""
+        video = self._resolve_video(vid)
+        if video is None:
+            return self._send_error_json(HTTPStatus.NOT_FOUND, "video not found")
+        if video.suffix.lower() not in GALLERY_VIDEO_EXTS:
+            return self._send_error_json(HTTPStatus.BAD_REQUEST, "not a video")
+        body = self._read_json_body()
+        if body is None:
+            return
+        t = body.get("t")
+        if not isinstance(t, (int, float)) or isinstance(t, bool) or t < 0:
+            return self._send_error_json(HTTPStatus.BAD_REQUEST,
+                                         "missing or invalid 't' (seconds)")
+        out_dir = frames_output_dir(self.root)
+        dest = unique_dest(out_dir, f"{video.stem}_frame_{timecode_label(float(t))}.jpg")
+        if not extract_frame(self.frames.ffmpeg, video, float(t), dest, quality=2):
+            return self._send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR,
+                                         "frame extraction failed")
+        rel = dest.relative_to(self.root).as_posix()
+        st = dest.stat()
+        mid = encode_id(rel)
+        item = {
+            "id": mid,
+            "name": dest.name,
+            "relpath": rel,
+            "type": "image",
+            "size": st.st_size,
+            "size_human": human_size(st.st_size),
+            "mtime": int(st.st_mtime),
+            "thumbnail_url": f"/api/thumbnails/{mid}",
+            "image_url": f"/api/image/{mid}",
+            "categories": [],
+        }
+        self._send_json(HTTPStatus.OK, {"ok": True, "item": item})
 
     def _serve_thumbnail(self, vid: str) -> None:
         video = self._resolve_video(vid)
@@ -988,6 +1177,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
                             seek_seconds=args.seek, width=args.thumb_width)
     transcodes = TranscodeCache(root=root, cache_dir=cache_dir,
                                 height=args.mobile_height, crf=args.mobile_crf)
+    frames = FrameCache(root=root, cache_dir=cache_dir)
 
     if args.prewarm:
         items = list_media(root, db_path)
@@ -1001,6 +1191,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
     handler.root = root
     handler.thumbs = thumbs
     handler.transcodes = transcodes
+    handler.frames = frames
     handler.db_path = db_path
 
     server = ThreadingHTTPServer((args.host, args.port), handler)
