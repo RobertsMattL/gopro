@@ -39,6 +39,7 @@ let selectedType = 'all';     // 'all' | 'image' | 'video' — media-type filter
 let viewMode = localStorage.getItem('viewMode') === 'grid' ? 'grid' : 'list';
 const selectedFilters = new Set();  // category ids; "__none__" for Uncategorized
 const selectedIds = new Set();      // media ids checked for bulk actions
+let anchorId = null;                 // pivot for shift-click range selection
 
 // Mobile-friendly stream toggle. Stored choice wins; otherwise default on for
 // phones. The backend will transcode a 720p MP4 on first request.
@@ -152,9 +153,10 @@ function renderList() {
       ? '<span class="type-badge play">▶</span>'
       : '<span class="type-badge photo">PHOTO</span>';
     card.innerHTML = `
-      <label class="card-select" aria-label="Select for bulk actions">
-        <input type="checkbox" ${isSelected ? 'checked' : ''} />
-      </label>
+      <span class="card-select" role="checkbox" aria-label="Select for bulk actions"
+            aria-checked="${isSelected}">
+        <input type="checkbox" tabindex="-1" ${isSelected ? 'checked' : ''} />
+      </span>
       <div class="thumb-wrap">
         <img class="thumb" loading="lazy" alt="" src="${v.thumbnail_url}"
              onerror="this.style.background='#222';this.removeAttribute('src');" />
@@ -166,17 +168,69 @@ function renderList() {
         ${cardCats ? `<div class="card-chips chip-row">${cardCats}</div>` : ''}
       </div>
     `;
-    const checkbox = card.querySelector('.card-select input');
-    const checkboxLabel = card.querySelector('.card-select');
-    checkboxLabel.addEventListener('click', (e) => e.stopPropagation());
-    checkbox.addEventListener('change', () => {
-      if (checkbox.checked) selectedIds.add(v.id);
-      else selectedIds.delete(v.id);
-      card.classList.toggle('selected', checkbox.checked);
-      renderBulkBar();
+    // The checkbox is an explicit per-item toggle; shift extends a range from
+    // it too, mirroring the modifier-clicks on the card body. Using a <span>
+    // (not <label>) avoids the label re-dispatching a click to the card.
+    const selectEl = card.querySelector('.card-select');
+    selectEl.addEventListener('click', (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      if (e.shiftKey) selectRange(v.id);
+      else { toggleSelected(v.id); anchorId = v.id; }
+      syncSelectionUI();
     });
-    card.addEventListener('click', () => select(v.id));
+    card.addEventListener('click', (e) => handleCardClick(v, e));
     listEl.appendChild(card);
+  }
+  renderBulkBar();
+}
+
+// ---- selection: plain = preview, ctrl/cmd = toggle one, shift = range ------
+
+function toggleSelected(id) {
+  if (selectedIds.has(id)) selectedIds.delete(id);
+  else selectedIds.add(id);
+}
+
+// Add every visible item between the anchor and `id` (inclusive) to the group.
+function selectRange(id) {
+  const items = visibleItems();
+  const to = items.findIndex((v) => v.id === id);
+  if (to === -1) return;
+  let from = anchorId ? items.findIndex((v) => v.id === anchorId) : -1;
+  if (from === -1) from = to;            // no anchor yet → just this one
+  const [lo, hi] = from <= to ? [from, to] : [to, from];
+  for (let i = lo; i <= hi; i++) selectedIds.add(items[i].id);
+  // Keep the original anchor so repeated shift-clicks re-range from it.
+}
+
+function handleCardClick(v, e) {
+  if (e.shiftKey) {
+    e.preventDefault();
+    selectRange(v.id);
+    syncSelectionUI();
+  } else if (e.metaKey || e.ctrlKey) {
+    e.preventDefault();
+    toggleSelected(v.id);
+    anchorId = v.id;
+    syncSelectionUI();
+  } else {
+    // Plain click previews/opens the item and arms it as the range anchor;
+    // the bulk group is left untouched.
+    anchorId = v.id;
+    select(v.id);
+  }
+}
+
+// Reflect selectedIds onto the existing cards without a full re-render.
+function syncSelectionUI() {
+  for (const card of listEl.querySelectorAll('.card')) {
+    const sel = selectedIds.has(card.dataset.id);
+    card.classList.toggle('selected', sel);
+    const cb = card.querySelector('.card-select input');
+    if (cb) cb.checked = sel;
+    const box = card.querySelector('.card-select');
+    if (box) box.setAttribute('aria-checked', String(sel));
   }
   renderBulkBar();
 }
@@ -504,6 +558,7 @@ bulkSelectAllBtn.addEventListener('click', () => {
 });
 bulkClearBtn.addEventListener('click', () => {
   selectedIds.clear();
+  anchorId = null;
   renderList();
 });
 bulkDeleteBtn.addEventListener('click', () => bulkDelete());

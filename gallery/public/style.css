@@ -109,12 +109,13 @@ button.active {
   border: 1px solid transparent;
   margin-bottom: 6px;
   align-items: flex-start;
+  user-select: none;          /* shift-click selects items, not text */
+  -webkit-user-select: none;
 }
 .card:hover { background: var(--panel-2); }
-.card.active {
-  background: var(--accent-bg);
-  border-color: var(--accent);
-}
+/* Active = the item open in the player/lightbox: just an accent outline. */
+.card.active { border-color: var(--accent); }
+/* Selected = part of the bulk group: filled, so a range reads as a block. */
 .card.selected {
   background: var(--accent-bg);
   border-color: var(--accent);
