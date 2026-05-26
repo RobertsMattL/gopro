@@ -5,7 +5,7 @@ enjoying it: a one-shot **exporter** that pulls clips off the SD card, and a
 fast **media gallery** that streams your videos and photos, tags them into
 categories, and lets you **grab and crop a still frame** from any clip.
 
-![GoPro Gallery — master/detail view](docs/screenshot-gallery.png)
+![GoPro Gallery — browsing a library of clips](docs/screenshot-gallery.png)
 
 ---
 
