@@ -85,6 +85,14 @@
       </div>
       <div class="frame-stage">
         <video id="frame-video" preload="auto" playsinline></video>
+        <div id="frame-crop" class="frame-crop">
+          <div id="frame-crop-rect" class="crop-rect" hidden>
+            <span class="crop-handle" data-h="nw"></span>
+            <span class="crop-handle" data-h="ne"></span>
+            <span class="crop-handle" data-h="sw"></span>
+            <span class="crop-handle" data-h="se"></span>
+          </div>
+        </div>
       </div>
       <div class="frame-scrub">
         <input id="frame-seek" type="range" min="0" max="0" step="0.001" value="0"
@@ -100,6 +108,8 @@
           <button type="button" data-step="frame" title="Next frame (→)">frame ▶</button>
           <button type="button" data-step="1" title="Forward 1 second">+1s</button>
         </span>
+        <span id="frame-crop-info" class="frame-crop-info">Drag on the frame to crop</span>
+        <button id="frame-crop-clear" type="button" class="frame-crop-clear" hidden>Clear crop</button>
         <button id="frame-save" type="button" class="frame-save">Save this frame</button>
       </div>
       <div id="frame-strip" class="frame-strip" aria-label="Sampled frames — click to jump"></div>

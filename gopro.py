@@ -491,20 +491,31 @@ class TranscodeCache:
 
 
 def extract_frame(ffmpeg: str, video: Path, t: float, dest: Path,
-                  width: int | None = None, quality: int = 2) -> bool:
+                  width: int | None = None, quality: int = 2,
+                  crop: tuple[float, float, float, float] | None = None) -> bool:
     """Extract a single still frame at ``t`` seconds from ``video`` to ``dest``
     (JPEG). Returns True on success.
 
     Uses input seeking (``-ss`` before ``-i``), which modern ffmpeg decodes
     accurately to the requested timestamp while staying fast on long clips.
     ``quality`` is the JPEG -q:v (lower is better); ``width`` downscales for
-    previews (height is kept even via scale=-2).
+    previews (height is kept even via scale=-2). ``crop`` is a fractional
+    ``(x, y, w, h)`` region in [0, 1] applied to the source frame before any
+    downscale, so a saved crop is at full source resolution.
     """
     t = max(0.0, float(t))
     cmd = [ffmpeg, "-y", "-nostdin", "-loglevel", "error",
            "-ss", f"{t:.3f}", "-i", str(video), "-frames:v", "1"]
+    filters = []
+    if crop is not None:
+        fx, fy, fw, fh = crop
+        filters.append(
+            f"crop=w=iw*{fw:.6f}:h=ih*{fh:.6f}:x=iw*{fx:.6f}:y=ih*{fy:.6f}"
+        )
     if width:
-        cmd += ["-vf", f"scale={int(width)}:-2"]
+        filters.append(f"scale={int(width)}:-2")
+    if filters:
+        cmd += ["-vf", ",".join(filters)]
     cmd += ["-q:v", str(quality), "-f", "image2", str(dest)]
     try:
         result = subprocess.run(cmd, capture_output=True, timeout=60)
@@ -591,6 +602,33 @@ def frames_output_dir(root: Path) -> Path:
         images.mkdir(parents=True, exist_ok=True)
         return images
     return root
+
+
+def parse_crop(raw) -> tuple[float, float, float, float] | None:
+    """Validate a fractional crop region {x, y, w, h} (each in [0, 1]) from a
+    request body. Returns a clamped (x, y, w, h) tuple, or None if absent.
+    Raises ValueError on malformed input."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("crop must be an object with x, y, w, h")
+    try:
+        x = float(raw["x"]); y = float(raw["y"])
+        w = float(raw["w"]); h = float(raw["h"])
+    except (KeyError, TypeError, ValueError):
+        raise ValueError("crop needs numeric x, y, w, h")
+    if w <= 0 or h <= 0:
+        raise ValueError("crop width and height must be positive")
+    # Allow a hair of float slop, then clamp into the unit square.
+    if x < -1e-3 or y < -1e-3 or x + w > 1 + 1e-3 or y + h > 1 + 1e-3:
+        raise ValueError("crop must lie within the frame")
+    x = min(max(x, 0.0), 1.0)
+    y = min(max(y, 0.0), 1.0)
+    w = min(w, 1.0 - x)
+    h = min(h, 1.0 - y)
+    if w <= 0 or h <= 0:
+        raise ValueError("crop is empty")
+    return (x, y, w, h)
 
 
 def timecode_label(t: float) -> str:
@@ -1041,9 +1079,14 @@ class GalleryHandler(BaseHTTPRequestHandler):
         if not isinstance(t, (int, float)) or isinstance(t, bool) or t < 0:
             return self._send_error_json(HTTPStatus.BAD_REQUEST,
                                          "missing or invalid 't' (seconds)")
+        try:
+            crop = parse_crop(body.get("crop"))
+        except ValueError as e:
+            return self._send_error_json(HTTPStatus.BAD_REQUEST, str(e))
         out_dir = frames_output_dir(self.root)
         dest = unique_dest(out_dir, f"{video.stem}_frame_{timecode_label(float(t))}.jpg")
-        if not extract_frame(self.frames.ffmpeg, video, float(t), dest, quality=2):
+        if not extract_frame(self.frames.ffmpeg, video, float(t), dest,
+                             quality=2, crop=crop):
             return self._send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR,
                                          "frame extraction failed")
         rel = dest.relative_to(self.root).as_posix()

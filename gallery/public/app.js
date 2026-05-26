@@ -40,6 +40,10 @@ const frameTimeEl = document.getElementById('frame-time');
 const framePlayEl = document.getElementById('frame-play');
 const frameSaveEl = document.getElementById('frame-save');
 const frameStripEl = document.getElementById('frame-strip');
+const frameCropEl = document.getElementById('frame-crop');
+const cropRectEl = document.getElementById('frame-crop-rect');
+const cropInfoEl = document.getElementById('frame-crop-info');
+const cropClearEl = document.getElementById('frame-crop-clear');
 
 let videos = [];              // all media items (images + videos), each with a .type
 let categories = [];          // [{id, name, count}]
@@ -638,6 +642,8 @@ document.addEventListener('keydown', (e) => {
 const FRAME_STEP = 1 / 30;   // ~one frame at 30fps; fine enough for selection
 let framePickerItem = null;  // the video currently open in the picker
 let frameScrubbing = false;  // user is dragging the seek slider
+let cropFrac = null;         // {x,y,w,h} fractions of the frame, or null = full
+let cropDrag = null;         // in-progress crop gesture state
 
 function fmtClock(sec) {
   if (!isFinite(sec) || sec < 0) sec = 0;
@@ -715,11 +721,121 @@ function highlightStrip() {
   if (best) best.classList.add('active');
 }
 
+// ---- crop overlay ----------------------------------------------------------
+// Keep the overlay glued to the rendered <video> box so a selection in display
+// space maps one-to-one onto source-frame fractions. Sizes change on metadata
+// load and window resize.
+function positionCropOverlay() {
+  if (!frameVideoEl.videoWidth) { frameCropEl.style.display = 'none'; return; }
+  frameCropEl.style.display = 'block';
+  frameCropEl.style.left = `${frameVideoEl.offsetLeft}px`;
+  frameCropEl.style.top = `${frameVideoEl.offsetTop}px`;
+  frameCropEl.style.width = `${frameVideoEl.offsetWidth}px`;
+  frameCropEl.style.height = `${frameVideoEl.offsetHeight}px`;
+  renderCrop();
+}
+
+function renderCrop() {
+  if (!cropFrac) {
+    cropRectEl.hidden = true;
+    cropClearEl.hidden = true;
+    cropInfoEl.textContent = 'Drag on the frame to crop';
+    return;
+  }
+  cropRectEl.hidden = false;
+  cropClearEl.hidden = false;
+  cropRectEl.style.left = `${cropFrac.x * 100}%`;
+  cropRectEl.style.top = `${cropFrac.y * 100}%`;
+  cropRectEl.style.width = `${cropFrac.w * 100}%`;
+  cropRectEl.style.height = `${cropFrac.h * 100}%`;
+  const pw = Math.round((frameVideoEl.videoWidth || 0) * cropFrac.w);
+  const ph = Math.round((frameVideoEl.videoHeight || 0) * cropFrac.h);
+  cropInfoEl.textContent = `Crop ${pw}×${ph}px`;
+}
+
+function clearCrop() {
+  cropFrac = null;
+  renderCrop();
+}
+
+// Pointer position as a clamped 0..1 fraction of the overlay (= of the frame).
+function cropEventFrac(e) {
+  const r = frameCropEl.getBoundingClientRect();
+  return {
+    x: Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)),
+    y: Math.min(1, Math.max(0, (e.clientY - r.top) / r.height)),
+  };
+}
+
+// Move one corner to point f while the opposite corner stays put.
+function resizeCropRect(c, corner, f) {
+  let x1 = c.x, y1 = c.y, x2 = c.x + c.w, y2 = c.y + c.h;
+  if (corner.includes('w')) x1 = f.x; else x2 = f.x;
+  if (corner.includes('n')) y1 = f.y; else y2 = f.y;
+  return { x: Math.min(x1, x2), y: Math.min(y1, y2),
+           w: Math.abs(x2 - x1), h: Math.abs(y2 - y1) };
+}
+
+frameCropEl.addEventListener('pointerdown', (e) => {
+  const handle = e.target.closest('.crop-handle');
+  const f = cropEventFrac(e);
+  if (handle) {
+    cropDrag = { mode: 'resize', corner: handle.dataset.h };
+  } else if (cropFrac && e.target === cropRectEl) {
+    cropDrag = { mode: 'move', startX: f.x, startY: f.y, orig: { ...cropFrac } };
+  } else {
+    cropDrag = { mode: 'draw', anchorX: f.x, anchorY: f.y };
+    cropFrac = { x: f.x, y: f.y, w: 0, h: 0 };
+  }
+  frameCropEl.setPointerCapture(e.pointerId);
+  e.preventDefault();
+});
+
+frameCropEl.addEventListener('pointermove', (e) => {
+  if (!cropDrag) return;
+  const f = cropEventFrac(e);
+  if (cropDrag.mode === 'draw') {
+    cropFrac = {
+      x: Math.min(cropDrag.anchorX, f.x),
+      y: Math.min(cropDrag.anchorY, f.y),
+      w: Math.abs(f.x - cropDrag.anchorX),
+      h: Math.abs(f.y - cropDrag.anchorY),
+    };
+  } else if (cropDrag.mode === 'move') {
+    const o = cropDrag.orig;
+    cropFrac = {
+      x: Math.min(Math.max(0, o.x + (f.x - cropDrag.startX)), 1 - o.w),
+      y: Math.min(Math.max(0, o.y + (f.y - cropDrag.startY)), 1 - o.h),
+      w: o.w, h: o.h,
+    };
+  } else {
+    cropFrac = resizeCropRect(cropFrac, cropDrag.corner, f);
+  }
+  renderCrop();
+});
+
+function endCropDrag() {
+  if (!cropDrag) return;
+  cropDrag = null;
+  // A click or a sliver isn't a crop — drop it so the full frame is saved.
+  if (cropFrac && (cropFrac.w < 0.02 || cropFrac.h < 0.02)) cropFrac = null;
+  renderCrop();
+}
+frameCropEl.addEventListener('pointerup', endCropDrag);
+frameCropEl.addEventListener('pointercancel', endCropDrag);
+cropClearEl.addEventListener('click', clearCrop);
+window.addEventListener('resize', () => {
+  if (!frameModalEl.classList.contains('hidden')) positionCropOverlay();
+});
+
 function openFramePicker(v) {
   framePickerItem = v;
   frameTitleEl.textContent = v.name;
   setFrameStatus('');
   frameSaveEl.disabled = false;
+  cropDrag = null;
+  clearCrop();
+  frameCropEl.style.display = 'none';  // until we know the video's size
   stopVideo();  // don't leave the main player running behind the modal
   frameStripEl.innerHTML = '<span class="strip-empty">Loading frames…</span>';
   framePlayEl.textContent = '▶';
@@ -738,6 +854,9 @@ function closeFramePicker() {
   frameModalEl.classList.add('hidden');
   frameModalEl.setAttribute('aria-hidden', 'true');
   framePickerItem = null;
+  cropDrag = null;
+  cropFrac = null;
+  frameCropEl.style.display = 'none';
 }
 
 async function saveCurrentFrame() {
@@ -746,13 +865,18 @@ async function saveCurrentFrame() {
   const t = frameVideoEl.currentTime || 0;
   frameSaveEl.disabled = true;
   setFrameStatus('saving…');
+  const payload = { t };
+  if (cropFrac && cropFrac.w > 0 && cropFrac.h > 0) {
+    payload.crop = { x: cropFrac.x, y: cropFrac.y, w: cropFrac.w, h: cropFrac.h };
+  }
   try {
     const res = await fetchJson(`/api/frames/${framePickerItem.id}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ t }),
+      body: JSON.stringify(payload),
     });
-    setFrameStatus(`saved ${res.item ? res.item.name : 'frame'} ✓ (${fmtClock(t)})`);
+    const what = payload.crop ? 'cropped frame' : 'frame';
+    setFrameStatus(`saved ${res.item ? res.item.name : what} ✓ (${fmtClock(t)})`);
     await refreshAll();  // surface the new photo in the gallery
   } catch (err) {
     setFrameStatus(`error: ${err.message}`, true);
@@ -765,7 +889,10 @@ frameVideoEl.addEventListener('loadedmetadata', () => {
   frameSeekEl.max = String(frameVideoEl.duration || 0);
   updateFrameTime();
   buildFilmstrip();
+  positionCropOverlay();
 });
+// The rendered box can change once the first frame paints / fonts settle.
+frameVideoEl.addEventListener('loadeddata', positionCropOverlay);
 frameVideoEl.addEventListener('timeupdate', updateFrameTime);
 frameVideoEl.addEventListener('seeked', () => { updateFrameTime(); highlightStrip(); });
 frameVideoEl.addEventListener('play', () => { framePlayEl.textContent = '⏸'; });

@@ -532,6 +532,41 @@ body.view-grid.lightbox-open .lb-nav { display: flex; }
   object-fit: contain;
 }
 
+/* Crop overlay: positioned by JS to sit exactly over the rendered video, so a
+   selection in here maps one-to-one onto the source frame. */
+.frame-crop {
+  position: absolute;
+  display: none;          /* shown by JS once video dimensions are known */
+  overflow: hidden;       /* clips the dimming shadow to the frame */
+  cursor: crosshair;
+  touch-action: none;
+}
+.crop-rect {
+  position: absolute;
+  box-sizing: border-box;
+  border: 1px solid #fff;
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.5);
+  cursor: move;
+}
+.crop-rect[hidden] { display: none; }
+.crop-handle {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  background: #fff;
+  border: 1px solid var(--accent);
+  border-radius: 2px;
+}
+.crop-handle[data-h="nw"] { left: -6px; top: -6px; cursor: nwse-resize; }
+.crop-handle[data-h="ne"] { right: -6px; top: -6px; cursor: nesw-resize; }
+.crop-handle[data-h="sw"] { left: -6px; bottom: -6px; cursor: nesw-resize; }
+.crop-handle[data-h="se"] { right: -6px; bottom: -6px; cursor: nwse-resize; }
+.frame-crop-info {
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
 .frame-scrub {
   display: flex;
   align-items: center;
